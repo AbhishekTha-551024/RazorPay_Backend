@@ -1,0 +1,29 @@
+{
+  "name": "magic-calculator-razorpay-backend",
+  "version": "1.0.0",
+  "description": "Serverless Express.js backend for Razorpay payment integration for Magic Calculator Android app",
+  "main": "api/index.js",
+  "scripts": {
+    "start": "node api/index.js",
+    "dev": "nodemon api/index.js"
+  },
+  "keywords": [
+    "razorpay",
+    "express",
+    "vercel",
+    "serverless",
+    "android",
+    "payments"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "razorpay": "^2.9.4"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  }
+}
