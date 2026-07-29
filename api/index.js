@@ -31,7 +31,7 @@ function getRazorpayInstance() {
 }
 
 // -----------------------------------------------------------------------------
-// 1. Health-Check Endpoint: GET /api/test or GET /
+// 1. Health-Check Endpoint: GET / or GET /api/test
 // -----------------------------------------------------------------------------
 app.get(['/', '/api/test'], (req, res) => {
   return res.status(200).json({
@@ -43,9 +43,9 @@ app.get(['/', '/api/test'], (req, res) => {
 });
 
 // -----------------------------------------------------------------------------
-// 2. Create Order Endpoint: POST /api/create-order
+// 2. Create Order Endpoint: POST /create-order or POST /api/create-order
 // -----------------------------------------------------------------------------
-app.post('/api/create-order', async (req, res) => {
+app.post(['/create-order', '/api/create-order'], async (req, res) => {
   try {
     const { amount, currency = 'INR', receipt, notes } = req.body;
 
@@ -92,9 +92,9 @@ app.post('/api/create-order', async (req, res) => {
 });
 
 // -----------------------------------------------------------------------------
-// 3. Verify Payment Signature Endpoint: POST /api/verify-payment
+// 3. Verify Payment Signature Endpoint: POST /verify-payment or POST /api/verify-payment
 // -----------------------------------------------------------------------------
-app.post('/api/verify-payment', (req, res) => {
+app.post(['/verify-payment', '/api/verify-payment'], (req, res) => {
   try {
     const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
 
