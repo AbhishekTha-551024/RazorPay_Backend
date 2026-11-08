@@ -282,6 +282,48 @@ test('verify requires a captured payment matching the signed order and plan', as
   assert.equal(retry.body.expiryMillis, result.body.expiryMillis);
 });
 
+test('verify reports Firestore permission failures without implying Razorpay rejected payment', async (t) => {
+  const db = createMemoryFirestore();
+  db.runTransaction = async () => {
+    const error = new Error('Missing or insufficient permissions.');
+    error.code = 7;
+    throw error;
+  };
+  const baseUrl = await startServer(t, {
+    orders: {
+      fetch: async (id) => ({
+        id,
+        amount: 14900,
+        currency: 'INR',
+        notes: { planType: 'WEEKLY', uid: 'user-123' },
+      }),
+    },
+    payments: {
+      fetch: async (id) => ({
+        id,
+        order_id: orderId,
+        amount: 14900,
+        currency: 'INR',
+        status: 'captured',
+        captured: true,
+        created_at: 1_800_000_000,
+      }),
+    },
+  }, db);
+
+  const result = await postJson(baseUrl, '/api/verify-payment', {
+    razorpay_order_id: orderId,
+    razorpay_payment_id: paymentId,
+    razorpay_signature: createSignature(),
+    planType: 'WEEKLY',
+  }, authHeaders());
+
+  assert.equal(result.response.status, 503);
+  assert.equal(result.body.success, false);
+  assert.match(result.body.message, /Firestore permissions blocked Premium activation/);
+  assert.match(result.body.message, /Do not pay again/);
+});
+
 test('verify requires the authenticated Firebase user to own the Razorpay order', async (t) => {
   const db = createMemoryFirestore();
   const baseUrl = await startServer(t, {
