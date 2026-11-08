@@ -209,6 +209,10 @@ This is **not a camera-scanner feature**. The app displays a payment QR on the c
 
 These endpoints require `FIREBASE_SERVICE_ACCOUNT_JSON`, `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, and `RAZORPAY_WEBHOOK_SECRET` in the deployment environment. Generate a Firebase service account from Firebase Console → Project settings → Service accounts. Store the complete JSON only in Vercel Environment Variables; never commit or share it. Give the service account only the project-level access needed to verify Firebase ID tokens and write Firestore (Firebase Admin SDK uses the service account's project IAM permissions).
 
+### Troubleshooting Firestore `PERMISSION_DENIED`
+
+The backend uses the service account's `project_id` explicitly for Firebase Admin and logs the Firebase project ID and service-account email (never the private key) when Firestore denies Premium activation. In Vercel **Production** logs, verify that this email exactly matches the principal granted `Cloud Datastore User` (`roles/datastore.user`) in that project. Also verify the Production `FIREBASE_SERVICE_ACCOUNT_JSON` belongs to the Firebase project used by the app. Firestore Security Rules do not control Admin SDK requests; do not broaden permissions to Owner or Editor to work around an identity/project mismatch. A denied activation does not mean Razorpay rejected or reversed a captured payment; do not create another payment while retrying verification.
+
 **Still required before QR payments work end to end:** deploy this backend, configure the Razorpay webhook in the correct Test Mode with the deployed `/api/razorpay/webhook` URL and the same webhook secret, and implement the Android QR UI/client calls for create/status. Restrict Firestore client writes to subscription entitlement fields so the app cannot grant Premium directly. The QR webhook grants Premium server-side only after validation.
 
 ### Official Razorpay references

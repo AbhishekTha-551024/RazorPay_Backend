@@ -24,6 +24,7 @@ const PLAN_CODES = new Set(Object.keys(PLAN_PRICES_INR));
 const PURCHASE_ATTEMPT_COLLECTION = 'qrPurchaseAttempts';
 const WEBHOOK_EVENT_COLLECTION = 'razorpayWebhookEvents';
 const QR_CLOSE_AFTER_SECONDS = 20 * 60;
+let firebaseIdentity = null;
 
 function getRazorpayInstance() {
   const keyId = process.env.RAZORPAY_KEY_ID;
@@ -102,12 +103,20 @@ function getFirebaseServices() {
       error.cause = cause;
       throw error;
     }
-    app = initializeApp({ credential: cert(serviceAccount) });
+    app = initializeApp({
+      credential: cert(serviceAccount),
+      projectId: serviceAccount.project_id,
+    });
+    firebaseIdentity = {
+      projectId: serviceAccount.project_id || null,
+      serviceAccountEmail: serviceAccount.client_email || null,
+    };
   }
 
   return {
     auth: getAuth(app),
     db: getFirestore(app),
+    firebaseIdentity,
   };
 }
 
@@ -640,8 +649,9 @@ function createApp({ razorpayFactory = getRazorpayInstance, firebaseServicesFact
       });
     }
 
+    let services;
     try {
-      const services = firebaseServicesFactory();
+      services = firebaseServicesFactory();
       const user = await authenticateUser(req, services);
       if (!user || typeof user.uid !== 'string' || !user.uid) {
         return res.status(401).json({
@@ -794,6 +804,22 @@ function createApp({ razorpayFactory = getRazorpayInstance, firebaseServicesFact
           status: 'failed',
           success: false,
           message: 'This payment is already associated with a different order.',
+        });
+      }
+      if (error.code === 7 || error.code === '7' || error.code === 'PERMISSION_DENIED') {
+        console.error('Firestore denied Premium activation.', {
+          firebaseProjectId: services && services.firebaseIdentity
+            ? services.firebaseIdentity.projectId
+            : null,
+          firebaseServiceAccount: services && services.firebaseIdentity
+            ? services.firebaseIdentity.serviceAccountEmail
+            : null,
+          errorCode: error.code,
+        });
+        return res.status(503).json({
+          status: 'failed',
+          success: false,
+          message: 'Payment was received, but Firestore permissions blocked Premium activation. Do not pay again; retry verification after the server permissions are fixed.',
         });
       }
       console.error('Error confirming Razorpay payment:', error);
