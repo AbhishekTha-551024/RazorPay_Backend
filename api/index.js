@@ -560,6 +560,7 @@ function createApp({ razorpayFactory = getRazorpayInstance, firebaseServicesFact
         amount: amountInRupees * 100,
         currency: 'INR',
         receipt: `mc_${Date.now()}_${crypto.randomBytes(8).toString('hex')}`,
+        payment_capture: 1, // Auto-capture immediately on payment success
         notes: {
           source: 'MagicCalculatorAndroid',
           planType,
@@ -641,8 +642,12 @@ function createApp({ razorpayFactory = getRazorpayInstance, firebaseServicesFact
       const orderCurrency = typeof order.currency === 'string' ? order.currency.toUpperCase() : '';
       const paymentCurrency = typeof payment.currency === 'string' ? payment.currency.toUpperCase() : '';
 
+      // Accept both 'captured' (auto-capture) and 'authorized' (manual capture).
+      // For UPI intent payments the status can briefly be 'authorized' before capture.
+      const paymentIsValid = payment.status === 'captured' || payment.status === 'authorized';
+
       if (payment.order_id !== orderId ||
-          payment.status !== 'captured' ||
+          !paymentIsValid ||
           !planType ||
           !requestedPlanType ||
           requestedPlanType !== planType ||
@@ -654,7 +659,7 @@ function createApp({ razorpayFactory = getRazorpayInstance, firebaseServicesFact
         return res.status(400).json({
           status: 'failed',
           success: false,
-          message: 'The payment is not captured or does not match the order.',
+          message: `The payment is not valid or does not match the order. Payment status: ${payment.status}`,
         });
       }
 
