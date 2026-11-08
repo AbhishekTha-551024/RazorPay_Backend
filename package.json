@@ -30,6 +30,7 @@
   },
   "overrides": {
     "glob": "^14.0.4",
-    "minimatch": "^11.0.5"
+    "minimatch": "^11.0.5",
+    "jwks-rsa": "3.2.2"
   }
 }
