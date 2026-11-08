@@ -12,6 +12,7 @@ process.env.RAZORPAY_WEBHOOK_SECRET = 'webhook-secret';
 
 const orderId = 'order_TestOrder123';
 const paymentId = 'pay_TestPayment123';
+const firebaseToken = 'valid-firebase-token';
 
 function createSignature(id = orderId, payment = paymentId) {
   return crypto
@@ -20,8 +21,19 @@ function createSignature(id = orderId, payment = paymentId) {
     .digest('hex');
 }
 
-async function startServer(t, razorpay) {
-  const app = createApp({ razorpayFactory: () => razorpay });
+async function startServer(t, razorpay, db = createMemoryFirestore()) {
+  const app = createApp({
+    razorpayFactory: () => razorpay,
+    firebaseServicesFactory: () => ({
+      auth: {
+        verifyIdToken: async (token) => {
+          if (token !== firebaseToken) throw new Error('Invalid token.');
+          return { uid: 'user-123' };
+        },
+      },
+      db,
+    }),
+  });
   const server = app.listen(0);
   await new Promise((resolve) => server.once('listening', resolve));
   t.after(() => new Promise((resolve, reject) => {
@@ -29,6 +41,10 @@ async function startServer(t, razorpay) {
     if (server.closeAllConnections) server.closeAllConnections();
   }));
   return `http://127.0.0.1:${server.address().port}`;
+}
+
+function authHeaders() {
+  return { authorization: `Bearer ${firebaseToken}` };
 }
 
 function createMemoryFirestore() {
@@ -110,10 +126,10 @@ async function startQrServer(t, razorpay, db = createMemoryFirestore()) {
   return { baseUrl: `http://127.0.0.1:${server.address().port}`, db };
 }
 
-async function postJson(baseUrl, path, body) {
+async function postJson(baseUrl, path, body, headers = {}) {
   const response = await fetch(`${baseUrl}${path}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...headers },
     body: JSON.stringify(body),
   });
   return { response, body: await response.json() };
@@ -162,8 +178,29 @@ test('create order rejects unrecognized plans and client-selected prices', async
   assert.equal(razorpayCalls, 0);
 });
 
+test('create order requires an authenticated Firebase user', async (t) => {
+  let razorpayCalls = 0;
+  const baseUrl = await startServer(t, {
+    orders: {
+      create: async () => {
+        razorpayCalls += 1;
+        return { id: orderId };
+      },
+    },
+  });
+
+  const result = await postJson(baseUrl, '/api/create-order', {
+    planType: 'WEEKLY',
+    amount: 149,
+    currency: 'INR',
+  });
+  assert.equal(result.response.status, 401);
+  assert.equal(razorpayCalls, 0);
+});
+
 test('create order uses the configured catalog price and plan metadata', async (t) => {
   let createdOrder;
+  const db = createMemoryFirestore();
   const baseUrl = await startServer(t, {
     orders: {
       create: async (options) => {
@@ -176,30 +213,32 @@ test('create order uses the configured catalog price and plan metadata', async (
         };
       },
     },
-  });
+  }, db);
 
   const result = await postJson(baseUrl, '/api/create-order', {
     planType: 'Weekly Pass',
     amount: 149,
     currency: 'INR',
-  });
+  }, authHeaders());
 
   assert.equal(result.response.status, 200);
   assert.equal(result.body.orderId, orderId);
   assert.equal(createdOrder.amount, 14900);
   assert.equal(createdOrder.currency, 'INR');
   assert.equal(createdOrder.notes.planType, 'WEEKLY');
+  assert.equal(createdOrder.notes.uid, 'user-123');
   assert.match(createdOrder.receipt, /^mc_\d+_[a-f0-9]{16}$/);
 });
 
 test('verify requires a captured payment matching the signed order and plan', async (t) => {
+  const db = createMemoryFirestore();
   const baseUrl = await startServer(t, {
     orders: {
       fetch: async (id) => ({
         id,
         amount: 14900,
         currency: 'INR',
-        notes: { planType: 'WEEKLY' },
+        notes: { planType: 'WEEKLY', uid: 'user-123' },
       }),
     },
     payments: {
@@ -209,21 +248,74 @@ test('verify requires a captured payment matching the signed order and plan', as
         amount: 14900,
         currency: 'INR',
         status: 'captured',
+        captured: true,
+        method: 'upi',
+        created_at: 1_800_000_000,
       }),
     },
-  });
+  }, db);
 
   const result = await postJson(baseUrl, '/api/verify-payment', {
     razorpay_order_id: orderId,
     razorpay_payment_id: paymentId,
     razorpay_signature: createSignature(),
     planType: 'WEEKLY',
-  });
+  }, authHeaders());
 
   assert.equal(result.response.status, 200);
   assert.equal(result.body.success, true);
   assert.equal(result.body.planType, 'WEEKLY');
   assert.equal(result.body.amount, 14900);
+  assert.equal(result.body.activatedAt, 1_800_000_000_000);
+  assert.equal(result.body.expiryMillis, 1_800_000_000_000 + 7 * 24 * 60 * 60 * 1000);
+  assert.equal(db.documents.get('users/user-123').isPremium, true);
+  assert.equal(db.documents.get('users/user-123').expiryMillis, result.body.expiryMillis);
+  assert.equal(db.documents.get(`users/user-123/transactions/${paymentId}`).orderId, orderId);
+
+  const retry = await postJson(baseUrl, '/api/verify-payment', {
+    razorpay_order_id: orderId,
+    razorpay_payment_id: paymentId,
+    razorpay_signature: createSignature(),
+    planType: 'WEEKLY',
+  }, authHeaders());
+  assert.equal(retry.response.status, 200);
+  assert.equal(retry.body.expiryMillis, result.body.expiryMillis);
+});
+
+test('verify requires the authenticated Firebase user to own the Razorpay order', async (t) => {
+  const db = createMemoryFirestore();
+  const baseUrl = await startServer(t, {
+    orders: {
+      fetch: async (id) => ({
+        id,
+        amount: 14900,
+        currency: 'INR',
+        notes: { planType: 'WEEKLY', uid: 'another-user' },
+      }),
+    },
+    payments: {
+      fetch: async (id) => ({
+        id,
+        order_id: orderId,
+        amount: 14900,
+        currency: 'INR',
+        status: 'captured',
+        captured: true,
+        created_at: 1_800_000_000,
+      }),
+    },
+  }, db);
+
+  const result = await postJson(baseUrl, '/api/verify-payment', {
+    razorpay_order_id: orderId,
+    razorpay_payment_id: paymentId,
+    razorpay_signature: createSignature(),
+    planType: 'WEEKLY',
+  }, authHeaders());
+
+  assert.equal(result.response.status, 400);
+  assert.equal(result.body.success, false);
+  assert.equal(db.documents.size, 0);
 });
 
 test('verify rejects invalid signatures before calling Razorpay', async (t) => {
@@ -252,7 +344,7 @@ test('verify rejects authorized rather than captured payments', async (t) => {
         id,
         amount: 14900,
         currency: 'INR',
-        notes: { planType: 'WEEKLY' },
+        notes: { planType: 'WEEKLY', uid: 'user-123' },
       }),
     },
     payments: {
@@ -262,6 +354,7 @@ test('verify rejects authorized rather than captured payments', async (t) => {
         amount: 14900,
         currency: 'INR',
         status: 'authorized',
+        captured: false,
       }),
     },
   });
@@ -271,7 +364,7 @@ test('verify rejects authorized rather than captured payments', async (t) => {
     razorpay_payment_id: paymentId,
     razorpay_signature: createSignature(),
     planType: 'WEEKLY',
-  });
+  }, authHeaders());
 
   assert.equal(result.response.status, 400);
   assert.equal(result.body.success, false);
@@ -284,7 +377,7 @@ test('verify rejects payments whose order or amount does not match', async (t) =
         id,
         amount: 14900,
         currency: 'INR',
-        notes: { planType: 'WEEKLY' },
+        notes: { planType: 'WEEKLY', uid: 'user-123' },
       }),
     },
     payments: {
@@ -294,6 +387,7 @@ test('verify rejects payments whose order or amount does not match', async (t) =
         amount: 29900,
         currency: 'INR',
         status: 'captured',
+        captured: true,
       }),
     },
   });
@@ -303,7 +397,7 @@ test('verify rejects payments whose order or amount does not match', async (t) =
     razorpay_payment_id: paymentId,
     razorpay_signature: createSignature(),
     planType: 'WEEKLY',
-  });
+  }, authHeaders());
 
   assert.equal(result.response.status, 400);
   assert.equal(result.body.success, false);

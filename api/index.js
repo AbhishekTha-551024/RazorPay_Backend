@@ -555,6 +555,12 @@ function createApp({ razorpayFactory = getRazorpayInstance, firebaseServicesFact
     }
 
     try {
+      const services = firebaseServicesFactory();
+      const user = await authenticateUser(req, services);
+      if (!user || typeof user.uid !== 'string' || !user.uid) {
+        return res.status(401).json({ success: false, error: 'A valid Firebase sign-in is required.' });
+      }
+
       const razorpay = razorpayFactory();
       const order = await razorpay.orders.create({
         amount: amountInRupees * 100,
@@ -564,6 +570,7 @@ function createApp({ razorpayFactory = getRazorpayInstance, firebaseServicesFact
         notes: {
           source: 'MagicCalculatorAndroid',
           planType,
+          uid: user.uid,
         },
       });
 
@@ -578,6 +585,10 @@ function createApp({ razorpayFactory = getRazorpayInstance, firebaseServicesFact
     } catch (error) {
       if (error.code === 'PAYMENT_CONFIGURATION_MISSING') {
         return res.status(503).json({ success: false, error: 'Payment service is not configured.' });
+      }
+      if (error.code === 'FIREBASE_CONFIGURATION_MISSING' ||
+          error.code === 'FIREBASE_CONFIGURATION_INVALID') {
+        return res.status(503).json({ success: false, error: 'Payment account verification is not configured.' });
       }
       console.error('Error creating Razorpay order:', error);
       return res.status(502).json({ success: false, error: 'Unable to create the payment order.' });
@@ -626,6 +637,16 @@ function createApp({ razorpayFactory = getRazorpayInstance, firebaseServicesFact
     }
 
     try {
+      const services = firebaseServicesFactory();
+      const user = await authenticateUser(req, services);
+      if (!user || typeof user.uid !== 'string' || !user.uid) {
+        return res.status(401).json({
+          status: 'failed',
+          success: false,
+          message: 'A valid Firebase sign-in is required.',
+        });
+      }
+
       const razorpay = razorpayFactory();
       const [order, payment] = await Promise.all([
         razorpay.orders.fetch(orderId),
@@ -633,20 +654,21 @@ function createApp({ razorpayFactory = getRazorpayInstance, firebaseServicesFact
       ]);
 
       const planType = normalizePlanType(order.notes && order.notes.planType);
+      const orderUid = order.notes && order.notes.uid;
       const requestedPlanType = body.planType === undefined
         ? planType
         : normalizePlanType(body.planType);
       const expectedAmount = planType ? PLAN_PRICES_INR[planType] * 100 : null;
       const orderAmount = Number(order.amount);
       const paymentAmount = Number(payment.amount);
+      const paidAtSeconds = Number(payment.created_at);
       const orderCurrency = typeof order.currency === 'string' ? order.currency.toUpperCase() : '';
       const paymentCurrency = typeof payment.currency === 'string' ? payment.currency.toUpperCase() : '';
 
-      // Accept both 'captured' (auto-capture) and 'authorized' (manual capture).
-      // For UPI intent payments the status can briefly be 'authorized' before capture.
-      const paymentIsValid = payment.status === 'captured' || payment.status === 'authorized';
+      const paymentIsValid = payment.status === 'captured';
 
-      if (payment.order_id !== orderId ||
+      if (orderUid !== user.uid ||
+          payment.order_id !== orderId ||
           !paymentIsValid ||
           !planType ||
           !requestedPlanType ||
@@ -654,6 +676,8 @@ function createApp({ razorpayFactory = getRazorpayInstance, firebaseServicesFact
           !Number.isSafeInteger(expectedAmount) ||
           orderAmount !== expectedAmount ||
           paymentAmount !== orderAmount ||
+          !Number.isSafeInteger(paidAtSeconds) ||
+          paidAtSeconds <= 0 ||
           orderCurrency !== 'INR' ||
           paymentCurrency !== 'INR') {
         return res.status(400).json({
@@ -662,6 +686,75 @@ function createApp({ razorpayFactory = getRazorpayInstance, firebaseServicesFact
           message: `The payment is not valid or does not match the order. Payment status: ${payment.status}`,
         });
       }
+
+      const activatedAt = paidAtSeconds * 1000;
+      const durationDays = subscriptionDurationDays(planType);
+      const isLifetime = planType === 'LIFETIME';
+      const expiryMillis = isLifetime
+        ? 0
+        : activatedAt + durationDays * 24 * 60 * 60 * 1000;
+      const planName = planType === 'WEEKLY' ? 'Weekly Pass'
+        : planType === 'MONTHLY' ? 'Monthly Pass'
+          : planType === 'YEARLY' ? '1 Year VIP Pass' : 'Lifetime VIP Pass';
+      const purchaseType = isLifetime ? 'lifetime' : 'subscription';
+      const startDate = new Date(activatedAt).toISOString();
+      const expiryDate = isLifetime
+        ? 'Never Expires (Lifetime Access)'
+        : new Date(expiryMillis).toISOString();
+      const userRef = services.db.collection('users').doc(user.uid);
+      const transactionRef = userRef.collection('transactions').doc(paymentId);
+      const entitlement = await services.db.runTransaction(async (transaction) => {
+        const existingPayment = await transaction.get(transactionRef);
+        const transactionData = {
+          orderId,
+          paymentId,
+          transactionId: paymentId,
+          planId: planType,
+          planName,
+          amount: paymentAmount / 100,
+          currency: paymentCurrency,
+          method: payment.method || 'unknown',
+          status: 'SUCCESS',
+          timestamp: activatedAt,
+          activatedAt,
+          startDate,
+          expiryMillis,
+          expiryDate,
+          purchaseType,
+        };
+
+        if (existingPayment.exists) {
+          const previous = existingPayment.data();
+          if (previous.orderId !== orderId ||
+              previous.paymentId !== paymentId ||
+              previous.planId !== planType ||
+              Number(previous.amount) !== paymentAmount / 100 ||
+              previous.currency !== paymentCurrency) {
+            const error = new Error('Payment record does not match the verified order.');
+            error.code = 'PAYMENT_RECORD_CONFLICT';
+            throw error;
+          }
+        }
+
+        transaction.set(userRef, {
+          isPremium: true,
+          isProUser: true,
+          planType: planName,
+          purchaseType,
+          transactionId: paymentId,
+          paymentId,
+          lastOrderId: orderId,
+          activatedAt,
+          lastPaymentDate: activatedAt,
+          startDate,
+          expiryMillis,
+          premiumExpiryDate: expiryMillis,
+          expiryDate,
+          lastSyncedAt: Date.now(),
+        }, { merge: true });
+        transaction.set(transactionRef, transactionData, { merge: true });
+        return { activatedAt, expiryMillis, purchaseType };
+      });
 
       return res.status(200).json({
         status: 'success',
@@ -672,6 +765,9 @@ function createApp({ razorpayFactory = getRazorpayInstance, firebaseServicesFact
         planType,
         amount: paymentAmount,
         currency: paymentCurrency,
+        activatedAt: entitlement.activatedAt,
+        expiryMillis: entitlement.expiryMillis,
+        purchaseType: entitlement.purchaseType,
       });
     } catch (error) {
       if (error.code === 'PAYMENT_CONFIGURATION_MISSING') {
@@ -679,6 +775,21 @@ function createApp({ razorpayFactory = getRazorpayInstance, firebaseServicesFact
           status: 'failed',
           success: false,
           message: 'Payment service is not configured.',
+        });
+      }
+      if (error.code === 'FIREBASE_CONFIGURATION_MISSING' ||
+          error.code === 'FIREBASE_CONFIGURATION_INVALID') {
+        return res.status(503).json({
+          status: 'failed',
+          success: false,
+          message: 'Premium activation is not configured.',
+        });
+      }
+      if (error.code === 'PAYMENT_RECORD_CONFLICT') {
+        return res.status(409).json({
+          status: 'failed',
+          success: false,
+          message: 'This payment is already associated with a different order.',
         });
       }
       console.error('Error confirming Razorpay payment:', error);

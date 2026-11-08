@@ -75,6 +75,8 @@ The server will run on `http://localhost:3000`.
    - Add:
      - `RAZORPAY_KEY_ID` = `rzp_test_...`
      - `RAZORPAY_KEY_SECRET` = `...`
+     - `FIREBASE_SERVICE_ACCOUNT_JSON` = the service account JSON for the same Firebase project used by the Android app
+   - Use separate Razorpay Test and Live credentials in their corresponding Vercel environments. Never use live credentials to test.
    - Redeploy using:
      ```bash
      vercel --prod
@@ -111,6 +113,7 @@ curl -X GET https://your-vercel-app.vercel.app/api/test
 ```bash
 curl -X POST https://your-vercel-app.vercel.app/api/create-order \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer FIREBASE_ID_TOKEN" \
   -d '{
     "amount": 149,
     "currency": "INR",
@@ -136,6 +139,7 @@ The backend owns the supported plan catalog and rejects client-supplied prices t
 ```bash
 curl -X POST https://your-vercel-app.vercel.app/api/verify-payment \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer FIREBASE_ID_TOKEN" \
   -d '{
     "razorpay_order_id": "order_P1XyZ9abc123",
     "razorpay_payment_id": "pay_P1XyZ9paymentId",
@@ -154,7 +158,7 @@ curl -X POST https://your-vercel-app.vercel.app/api/verify-payment \
 }
 ```
 
-Verification checks the HMAC signature, fetches the order and payment from Razorpay, and only returns success when the payment is captured and the order, amount, currency, and plan match. The verification endpoint does not itself write subscription data to Firebase.
+Order creation requires a valid Firebase ID token and binds the verified UID to the Razorpay order notes. Verification checks the HMAC signature, authenticates the same Firebase user, fetches the order and payment from Razorpay, and only returns success for a captured payment whose owner, order, amount, currency, and plan match. Before returning success, the endpoint uses Firebase Admin to atomically merge the premium entitlement and append the transaction under that verified user's Firestore document. Repeated verification of the same payment is idempotent and does not extend its expiry.
 
 ## Add “Pay by QR on another phone”
 
@@ -226,4 +230,4 @@ npm test
 
 ## Important production follow-up
 
-The app must not treat a client-side verification response as the only authority for granting Premium. The next security improvement is to authenticate the Firebase user on the server, bind each order to that verified UID, and have a trusted server component write the verified entitlement and transaction to Firestore idempotently. Also configure Firestore rules to prevent clients from writing subscription/transaction entitlement fields. A Razorpay webhook with signature verification and duplicate-event protection should reconcile payment capture/refund events.
+The Android app must use the same Razorpay key mode as the Vercel environment. Keep Firestore client rules restrictive: only the backend service account should write subscription entitlement fields and verified payment records. Configure a Razorpay webhook with signature verification and duplicate-event protection to reconcile asynchronous payment/refund events.
