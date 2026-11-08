@@ -80,8 +80,12 @@ function webhookSignatureMatches(rawBody, signature, webhookSecret) {
 }
 
 function getFirebaseServices() {
-  const admin = require('firebase-admin');
-  if (admin.apps.length === 0) {
+  const { cert, getApps, initializeApp } = require('firebase-admin/app');
+  const { getAuth } = require('firebase-admin/auth');
+  const { getFirestore } = require('firebase-admin/firestore');
+  let app = getApps()[0];
+
+  if (!app) {
     const serviceAccountValue = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
     if (!serviceAccountValue) {
       const error = new Error('Firebase Admin credentials are not configured.');
@@ -98,12 +102,12 @@ function getFirebaseServices() {
       error.cause = cause;
       throw error;
     }
-    admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+    app = initializeApp({ credential: cert(serviceAccount) });
   }
 
   return {
-    auth: admin.auth(),
-    db: admin.firestore(),
+    auth: getAuth(app),
+    db: getFirestore(app),
   };
 }
 
