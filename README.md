@@ -9,7 +9,12 @@ A lightweight Node.js Express serverless backend for creating Razorpay orders an
 ```text
 razorpay-backend/
 ├── api/
-│   └── index.js          # Express app serverless function
+│   ├── index.js          # Express app and Vercel entry point (<500 lines)
+│   ├── services.js       # Firebase, Razorpay, validation and shared helpers
+│   └── routes/
+│       ├── payments.js   # Order creation and payment verification
+│       ├── qr.js         # QR creation and status
+│       └── webhook.js    # Razorpay QR webhook processing
 ├── test/
 │   └── payment-api.test.js
 ├── .gitignore

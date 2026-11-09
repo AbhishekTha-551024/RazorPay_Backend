@@ -223,6 +223,7 @@ test('create order uses the configured catalog price and plan metadata', async (
 
   assert.equal(result.response.status, 200);
   assert.equal(result.body.orderId, orderId);
+  assert.equal(result.body.key, process.env.RAZORPAY_KEY_ID);
   assert.equal(createdOrder.amount, 14900);
   assert.equal(createdOrder.currency, 'INR');
   assert.equal(createdOrder.notes.planType, 'WEEKLY');
