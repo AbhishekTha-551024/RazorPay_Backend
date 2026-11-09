@@ -5,6 +5,7 @@ const express = require('express');
 const cors = require('cors');
 const {
   getFirebaseServices,
+  getMissingEnv,
   getRazorpayInstance,
 } = require('./services');
 const { registerWebhookRoute } = require('./routes/webhook');
@@ -26,33 +27,48 @@ function createApp({
 
   app.use(cors({
     origin(origin, callback) {
+      // Android app requests have no Origin header, so they are allowed.
       if (!origin || allowedOrigins.has(origin)) return callback(null, true);
-      return callback(new Error('Origin is not allowed by CORS.'));
+      const error = new Error('Origin is not allowed by CORS.');
+      error.code = 'CORS_ORIGIN_DENIED';
+      return callback(error);
     },
   }));
 
+  // Webhook must be registered BEFORE express.json() because it needs the raw body.
   registerWebhookRoute(app, dependencies);
 
   app.use(express.json({ limit: '16kb' }));
   app.use(express.urlencoded({ extended: false, limit: '8kb' }));
 
-  app.get(['/', '/api/test'], (req, res) => res.status(200).json({
-    success: true,
-    message: 'Razorpay backend serverless function is live!',
-    timestamp: new Date().toISOString(),
-    envConfigured: Boolean(process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET),
-  }));
+  app.get(['/', '/api/test'], (req, res) => {
+    const missing = getMissingEnv();
+    const body = {
+      success: true,
+      message: 'Razorpay backend serverless function is live!',
+      timestamp: new Date().toISOString(),
+      envConfigured: missing.length === 0,
+    };
+    // Only show variable names outside production (names only, never values).
+    if (process.env.VERCEL_ENV !== 'production') body.missingEnv = missing;
+    return res.status(200).json(body);
+  });
 
   registerQrRoutes(app, dependencies);
   registerPaymentRoutes(app, dependencies);
 
+  // 404 handler (must come after all routes)
+  app.use((req, res) => res.status(404).json({ success: false, error: 'Route not found.' }));
+
+  // Central error handler
   app.use((error, req, res, next) => {
     if (res.headersSent) return next(error);
+    console.error('Unhandled error:', error.code || '', error.message);
     const status = error.type === 'entity.too.large'
       ? 413
       : error.type === 'entity.parse.failed'
         ? 400
-        : error.message === 'Origin is not allowed by CORS.'
+        : error.code === 'CORS_ORIGIN_DENIED'
           ? 403
           : 500;
     return res.status(status).json({

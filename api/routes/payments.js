@@ -6,6 +6,7 @@ const {
   authenticateUser,
   normalizePlanType,
   parseAmountInRupees,
+  planDisplayName,
   signatureMatches,
   subscriptionDurationDays,
   validRazorpayId,
@@ -64,14 +65,14 @@ function registerPaymentRoutes(app, { razorpayFactory, firebaseServicesFactory }
         key: process.env.RAZORPAY_KEY_ID || undefined,
       });
     } catch (error) {
+      console.error('create-order failed:', error.code, error.message);
       if (error.code === 'PAYMENT_CONFIGURATION_MISSING') {
         return res.status(503).json({ success: false, error: 'Payment service is not configured.' });
       }
       if (error.code === 'FIREBASE_CONFIGURATION_MISSING' ||
-          error.code === 'FIREBASE_CONFIGURATION_INVALID') {
+        error.code === 'FIREBASE_CONFIGURATION_INVALID') {
         return res.status(503).json({ success: false, error: 'Payment account verification is not configured.' });
       }
-      console.error('Error creating Razorpay order:', error);
       return res.status(502).json({ success: false, error: 'Unable to create the payment order.' });
     }
   });
@@ -90,9 +91,9 @@ function registerPaymentRoutes(app, { razorpayFactory, firebaseServicesFactory }
     const paymentId = body.razorpay_payment_id;
     const signature = body.razorpay_signature;
     if (!validRazorpayId(orderId, 'order') ||
-        !validRazorpayId(paymentId, 'pay') ||
-        typeof signature !== 'string' ||
-        !/^[a-fA-F0-9]{64}$/.test(signature)) {
+      !validRazorpayId(paymentId, 'pay') ||
+      typeof signature !== 'string' ||
+      !/^[a-fA-F0-9]{64}$/.test(signature)) {
       return res.status(400).json({
         status: 'failed',
         success: false,
@@ -102,6 +103,7 @@ function registerPaymentRoutes(app, { razorpayFactory, firebaseServicesFactory }
 
     const keySecret = process.env.RAZORPAY_KEY_SECRET;
     if (!keySecret) {
+      console.error('verify-payment: RAZORPAY_KEY_SECRET is missing.');
       return res.status(503).json({
         status: 'failed',
         success: false,
@@ -148,18 +150,18 @@ function registerPaymentRoutes(app, { razorpayFactory, firebaseServicesFactory }
       const paymentCurrency = typeof payment.currency === 'string' ? payment.currency.toUpperCase() : '';
 
       if (orderUid !== user.uid ||
-          payment.order_id !== orderId ||
-          payment.status !== 'captured' ||
-          !planType ||
-          !requestedPlanType ||
-          requestedPlanType !== planType ||
-          !Number.isSafeInteger(expectedAmount) ||
-          orderAmount !== expectedAmount ||
-          paymentAmount !== orderAmount ||
-          !Number.isSafeInteger(paidAtSeconds) ||
-          paidAtSeconds <= 0 ||
-          orderCurrency !== 'INR' ||
-          paymentCurrency !== 'INR') {
+        payment.order_id !== orderId ||
+        payment.status !== 'captured' ||
+        !planType ||
+        !requestedPlanType ||
+        requestedPlanType !== planType ||
+        !Number.isSafeInteger(expectedAmount) ||
+        orderAmount !== expectedAmount ||
+        paymentAmount !== orderAmount ||
+        !Number.isSafeInteger(paidAtSeconds) ||
+        paidAtSeconds <= 0 ||
+        orderCurrency !== 'INR' ||
+        paymentCurrency !== 'INR') {
         return res.status(400).json({
           status: 'failed',
           success: false,
@@ -173,9 +175,7 @@ function registerPaymentRoutes(app, { razorpayFactory, firebaseServicesFactory }
       const expiryMillis = isLifetime
         ? 0
         : activatedAt + durationDays * 24 * 60 * 60 * 1000;
-      const planName = planType === 'WEEKLY' ? 'Weekly Pass'
-        : planType === 'MONTHLY' ? 'Monthly Pass'
-          : planType === 'YEARLY' ? '1 Year VIP Pass' : 'Lifetime VIP Pass';
+      const planName = planDisplayName(planType);
       const purchaseType = isLifetime ? 'lifetime' : 'subscription';
       const startDate = new Date(activatedAt).toISOString();
       const expiryDate = isLifetime
@@ -206,10 +206,10 @@ function registerPaymentRoutes(app, { razorpayFactory, firebaseServicesFactory }
         if (existingPayment.exists) {
           const previous = existingPayment.data();
           if (previous.orderId !== orderId ||
-              previous.paymentId !== paymentId ||
-              previous.planId !== planType ||
-              Number(previous.amount) !== paymentAmount / 100 ||
-              previous.currency !== paymentCurrency) {
+            previous.paymentId !== paymentId ||
+            previous.planId !== planType ||
+            Number(previous.amount) !== paymentAmount / 100 ||
+            previous.currency !== paymentCurrency) {
             const error = new Error('Payment record does not match the verified order.');
             error.code = 'PAYMENT_RECORD_CONFLICT';
             throw error;
@@ -250,6 +250,7 @@ function registerPaymentRoutes(app, { razorpayFactory, firebaseServicesFactory }
         purchaseType: entitlement.purchaseType,
       });
     } catch (error) {
+      console.error('verify-payment failed:', error.code, error.message);
       if (error.code === 'PAYMENT_CONFIGURATION_MISSING') {
         return res.status(503).json({
           status: 'failed',
@@ -258,7 +259,7 @@ function registerPaymentRoutes(app, { razorpayFactory, firebaseServicesFactory }
         });
       }
       if (error.code === 'FIREBASE_CONFIGURATION_MISSING' ||
-          error.code === 'FIREBASE_CONFIGURATION_INVALID') {
+        error.code === 'FIREBASE_CONFIGURATION_INVALID') {
         return res.status(503).json({
           status: 'failed',
           success: false,
@@ -288,7 +289,6 @@ function registerPaymentRoutes(app, { razorpayFactory, firebaseServicesFactory }
           message: 'Payment was received, but Firestore permissions blocked Premium activation. Do not pay again; retry verification after the server permissions are fixed.',
         });
       }
-      console.error('Error confirming Razorpay payment:', error);
       return res.status(502).json({
         status: 'failed',
         success: false,

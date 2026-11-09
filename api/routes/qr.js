@@ -5,8 +5,8 @@ const {
   PURCHASE_ATTEMPT_COLLECTION,
   QR_CLOSE_AFTER_SECONDS,
   authenticateUser,
+  isValidUuid,
   normalizePlanType,
-  requireUuid,
   validRazorpayId,
 } = require('../services');
 
@@ -17,9 +17,14 @@ function registerQrRoutes(app, { razorpayFactory, firebaseServicesFactory }) {
     if (!planType) {
       return res.status(400).json({ success: false, error: 'A supported planType is required.' });
     }
-    if (!requireUuid(attemptId)) {
+    if (!isValidUuid(attemptId)) {
       return res.status(400).json({ success: false, error: 'A UUID v4 Idempotency-Key is required.' });
     }
+
+    // Hoisted so the catch block can mark a stuck attempt as failed.
+    let attemptRef = null;
+    let attemptCreatedNow = false;
+    let qrCreated = false;
 
     try {
       const services = firebaseServicesFactory();
@@ -28,7 +33,7 @@ function registerQrRoutes(app, { razorpayFactory, firebaseServicesFactory }) {
         return res.status(401).json({ success: false, error: 'A valid Firebase sign-in is required.' });
       }
 
-      const attemptRef = services.db.collection(PURCHASE_ATTEMPT_COLLECTION).doc(attemptId);
+      attemptRef = services.db.collection(PURCHASE_ATTEMPT_COLLECTION).doc(attemptId);
       const nowMillis = Date.now();
       const existing = await services.db.runTransaction(async (transaction) => {
         const snapshot = await transaction.get(attemptRef);
@@ -74,6 +79,7 @@ function registerQrRoutes(app, { razorpayFactory, firebaseServicesFactory }) {
           error: 'This purchase attempt is already being created or cannot be retried. Start a new attempt.',
         });
       }
+      attemptCreatedNow = true;
 
       const expiresAt = Math.floor(Date.now() / 1000) + QR_CLOSE_AFTER_SECONDS;
       const qr = await razorpayFactory().qrCode.create({
@@ -90,14 +96,15 @@ function registerQrRoutes(app, { razorpayFactory, firebaseServicesFactory }) {
           purchaseAttemptId: attemptId,
         },
       });
+      qrCreated = true;
 
       if (!validRazorpayId(qr.id, 'qr') ||
-          typeof qr.image_url !== 'string' ||
-          !qr.image_url.startsWith('https://') ||
-          qr.type !== 'upi_qr' ||
-          qr.usage !== 'single_use' ||
-          qr.fixed_amount !== true ||
-          Number(qr.payment_amount) !== PLAN_PRICES_INR[planType] * 100) {
+        typeof qr.image_url !== 'string' ||
+        !qr.image_url.startsWith('https://') ||
+        qr.type !== 'upi_qr' ||
+        qr.usage !== 'single_use' ||
+        qr.fixed_amount !== true ||
+        Number(qr.payment_amount) !== PLAN_PRICES_INR[planType] * 100) {
         throw new Error('Razorpay returned an invalid QR code response.');
       }
 
@@ -118,18 +125,28 @@ function registerQrRoutes(app, { razorpayFactory, firebaseServicesFactory }) {
         currency: 'INR',
       });
     } catch (error) {
+      console.error('create-qr failed:', error.code, error.message);
+
+      // If Razorpay failed before a QR existed, don't leave the attempt stuck in "creating".
+      if (attemptRef && attemptCreatedNow && !qrCreated) {
+        try {
+          await attemptRef.update({ state: 'failed', failedAt: Date.now() });
+        } catch (updateError) {
+          console.error('Could not mark attempt as failed:', updateError.message);
+        }
+      }
+
       if (error.code === 'FIREBASE_CONFIGURATION_MISSING' ||
-          error.code === 'FIREBASE_CONFIGURATION_INVALID' ||
-          error.code === 'PAYMENT_CONFIGURATION_MISSING') {
+        error.code === 'FIREBASE_CONFIGURATION_INVALID' ||
+        error.code === 'PAYMENT_CONFIGURATION_MISSING') {
         return res.status(503).json({ success: false, error: 'QR payment service is not configured.' });
       }
-      console.error('Error creating Razorpay QR code:', error);
       return res.status(502).json({ success: false, error: 'Unable to create the payment QR code.' });
     }
   });
 
   app.get(['/qr-status/:attemptId', '/api/qr-status/:attemptId'], async (req, res) => {
-    if (!requireUuid(req.params.attemptId)) {
+    if (!isValidUuid(req.params.attemptId)) {
       return res.status(400).json({ success: false, error: 'A valid purchase attempt ID is required.' });
     }
     try {
@@ -161,11 +178,11 @@ function registerQrRoutes(app, { razorpayFactory, firebaseServicesFactory }) {
         paymentId: attempt.paymentId,
       });
     } catch (error) {
+      console.error('qr-status failed:', error.code, error.message);
       if (error.code === 'FIREBASE_CONFIGURATION_MISSING' ||
-          error.code === 'FIREBASE_CONFIGURATION_INVALID') {
+        error.code === 'FIREBASE_CONFIGURATION_INVALID') {
         return res.status(503).json({ success: false, error: 'QR payment service is not configured.' });
       }
-      console.error('Error fetching QR purchase status:', error);
       return res.status(502).json({ success: false, error: 'Unable to fetch purchase status.' });
     }
   });

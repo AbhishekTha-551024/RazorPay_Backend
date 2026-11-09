@@ -7,7 +7,7 @@ const PLAN_PRICES_INR = Object.freeze({
   WEEKLY: 149,
   MONTHLY: 299,
   YEARLY: 1999,
-  LIFETIME: 1999,
+  LIFETIME: 4999,
 });
 
 const PLAN_ALIASES = Object.freeze({
@@ -22,6 +22,16 @@ const PURCHASE_ATTEMPT_COLLECTION = 'qrPurchaseAttempts';
 const WEBHOOK_EVENT_COLLECTION = 'razorpayWebhookEvents';
 const QR_CLOSE_AFTER_SECONDS = 20 * 60;
 let firebaseIdentity = null;
+
+// Returns the names of required env variables that are not set.
+function getMissingEnv() {
+  return [
+    'RAZORPAY_KEY_ID',
+    'RAZORPAY_KEY_SECRET',
+    'RAZORPAY_WEBHOOK_SECRET',
+    'FIREBASE_SERVICE_ACCOUNT_JSON',
+  ].filter((name) => !process.env[name]);
+}
 
 function getRazorpayInstance() {
   const keyId = process.env.RAZORPAY_KEY_ID;
@@ -66,8 +76,8 @@ function signatureMatches(orderId, paymentId, signature, keySecret) {
 
 function webhookSignatureMatches(rawBody, signature, webhookSecret) {
   if (!Buffer.isBuffer(rawBody) ||
-      typeof signature !== 'string' ||
-      !/^[a-fA-F0-9]{64}$/.test(signature)) return false;
+    typeof signature !== 'string' ||
+    !/^[a-fA-F0-9]{64}$/.test(signature)) return false;
   const expected = crypto.createHmac('sha256', webhookSecret).update(rawBody).digest();
   const received = Buffer.from(signature, 'hex');
   return received.length === expected.length && crypto.timingSafeEqual(expected, received);
@@ -96,6 +106,12 @@ function getFirebaseServices() {
       error.cause = cause;
       throw error;
     }
+
+    // Vercel sometimes stores private_key with literal "\n" instead of real newlines.
+    if (typeof serviceAccount.private_key === 'string') {
+      serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+    }
+
     app = initializeApp({
       credential: cert(serviceAccount),
       projectId: serviceAccount.project_id,
@@ -113,7 +129,7 @@ function getFirebaseServices() {
   };
 }
 
-function requireUuid(value) {
+function isValidUuid(value) {
   return typeof value === 'string' &&
     /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
@@ -128,8 +144,10 @@ async function authenticateUser(req, firebaseServices) {
   const token = getBearerToken(req);
   if (!token) return null;
   try {
-    return await firebaseServices.auth.verifyIdToken(token);
+    // second argument true = also reject revoked tokens
+    return await firebaseServices.auth.verifyIdToken(token, true);
   } catch (error) {
+    console.error('Firebase token verification failed:', error.code || error.message);
     return null;
   }
 }
@@ -138,7 +156,16 @@ function subscriptionDurationDays(planType) {
   if (planType === 'WEEKLY') return 7;
   if (planType === 'MONTHLY') return 30;
   if (planType === 'YEARLY') return 365;
-  return 36500;
+  if (planType === 'LIFETIME') return 36500;
+  throw new Error(`Unknown plan type: ${planType}`);
+}
+
+function planDisplayName(planType) {
+  if (planType === 'WEEKLY') return 'Weekly Pass';
+  if (planType === 'MONTHLY') return 'Monthly Pass';
+  if (planType === 'YEARLY') return '1 Year VIP Pass';
+  if (planType === 'LIFETIME') return 'Lifetime VIP Pass';
+  throw new Error(`Unknown plan type: ${planType}`);
 }
 
 module.exports = {
@@ -148,10 +175,12 @@ module.exports = {
   WEBHOOK_EVENT_COLLECTION,
   authenticateUser,
   getFirebaseServices,
+  getMissingEnv,
   getRazorpayInstance,
+  isValidUuid,
   normalizePlanType,
   parseAmountInRupees,
-  requireUuid,
+  planDisplayName,
   signatureMatches,
   subscriptionDurationDays,
   validRazorpayId,

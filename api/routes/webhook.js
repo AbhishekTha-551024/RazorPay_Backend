@@ -5,8 +5,9 @@ const {
   PLAN_PRICES_INR,
   PURCHASE_ATTEMPT_COLLECTION,
   WEBHOOK_EVENT_COLLECTION,
+  isValidUuid,
   normalizePlanType,
-  requireUuid,
+  planDisplayName,
   subscriptionDurationDays,
   validRazorpayId,
   webhookSignatureMatches,
@@ -19,6 +20,7 @@ function registerWebhookRoute(app, { razorpayFactory, firebaseServicesFactory })
   }), async (req, res) => {
     const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
     if (!webhookSecret) {
+      console.error('webhook: RAZORPAY_WEBHOOK_SECRET is missing.');
       return res.status(503).json({ success: false, error: 'Webhook is not configured.' });
     }
 
@@ -66,23 +68,23 @@ function registerWebhookRoute(app, { razorpayFactory, firebaseServicesFactory })
       const paymentCreatedAt = Number(payment.created_at);
       const paymentIsCaptured = payment.status === 'captured' && payment.captured === true;
 
-      if (!requireUuid(purchaseAttemptId) ||
-          qr.id !== qrCodeId ||
-          qr.type !== 'upi_qr' ||
-          qr.usage !== 'single_use' ||
-          qr.fixed_amount !== true ||
-          !planType ||
-          !Number.isSafeInteger(expectedAmount) ||
-          qrAmount !== expectedAmount ||
-          paymentIsCaptured !== true ||
-          payment.method !== 'upi' ||
-          payment.currency !== 'INR' ||
-          paymentAmount !== expectedAmount ||
-          !Number.isFinite(closeBy) ||
-          !Number.isFinite(qrCreatedAt) ||
-          !Number.isFinite(paymentCreatedAt) ||
-          paymentCreatedAt < qrCreatedAt ||
-          paymentCreatedAt > closeBy) {
+      if (!isValidUuid(purchaseAttemptId) ||
+        qr.id !== qrCodeId ||
+        qr.type !== 'upi_qr' ||
+        qr.usage !== 'single_use' ||
+        qr.fixed_amount !== true ||
+        !planType ||
+        !Number.isSafeInteger(expectedAmount) ||
+        qrAmount !== expectedAmount ||
+        paymentIsCaptured !== true ||
+        payment.method !== 'upi' ||
+        payment.currency !== 'INR' ||
+        paymentAmount !== expectedAmount ||
+        !Number.isFinite(closeBy) ||
+        !Number.isFinite(qrCreatedAt) ||
+        !Number.isFinite(paymentCreatedAt) ||
+        paymentCreatedAt < qrCreatedAt ||
+        paymentCreatedAt > closeBy) {
         console.error('Rejected QR payment webhook due to a QR/payment mismatch.', {
           eventId,
           qrCodeId,
@@ -139,11 +141,11 @@ function registerWebhookRoute(app, { razorpayFactory, firebaseServicesFactory })
           return 'duplicate';
         }
         if (attempt.state !== 'pending' ||
-            attempt.qrCodeId !== qrCodeId ||
-            Number(attempt.expiresAt) !== closeBy ||
-            attempt.uid !== (qr.notes && qr.notes.uid) ||
-            attempt.planType !== planType ||
-            attempt.amount !== expectedAmount) {
+          attempt.qrCodeId !== qrCodeId ||
+          Number(attempt.expiresAt) !== closeBy ||
+          attempt.uid !== (qr.notes && qr.notes.uid) ||
+          attempt.planType !== planType ||
+          attempt.amount !== expectedAmount) {
           transaction.create(eventRef, {
             event: event.event,
             paymentId,
@@ -157,9 +159,7 @@ function registerWebhookRoute(app, { razorpayFactory, firebaseServicesFactory })
         }
 
         const uid = attempt.uid;
-        const planName = planType === 'WEEKLY' ? 'Weekly Pass'
-          : planType === 'MONTHLY' ? 'Monthly Pass'
-            : planType === 'YEARLY' ? '1 Year VIP Pass' : 'Lifetime VIP Pass';
+        const planName = planDisplayName(planType);
         const orderId = typeof payment.order_id === 'string' ? payment.order_id : '';
         transaction.set(userRef(uid), {
           isPremium: true,
@@ -214,12 +214,12 @@ function registerWebhookRoute(app, { razorpayFactory, firebaseServicesFactory })
 
       return res.status(200).json({ success: true, state: result });
     } catch (error) {
+      console.error('webhook failed:', error.code, error.message);
       if (error.code === 'FIREBASE_CONFIGURATION_MISSING' ||
-          error.code === 'FIREBASE_CONFIGURATION_INVALID' ||
-          error.code === 'PAYMENT_CONFIGURATION_MISSING') {
+        error.code === 'FIREBASE_CONFIGURATION_INVALID' ||
+        error.code === 'PAYMENT_CONFIGURATION_MISSING') {
         return res.status(503).json({ success: false, error: 'Payment confirmation is not configured.' });
       }
-      console.error('Error processing Razorpay QR webhook:', error);
       return res.status(500).json({ success: false, error: 'Unable to process payment notification.' });
     }
   });
